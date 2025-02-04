@@ -255,3 +255,15 @@ export const REDIS_PREFIXES = {
     TOKEN_BLACKLIST: 'blacklist:',
     RATE_LIMIT: 'rate-limit:'
 } as const;
+
+
+/**
+ * JWT Token Payload
+ * Extended JWT payload with custom claims
+ */
+export interface TokenPayload extends JwtPayload {
+    userId: string;
+    userType: UserType;
+    roleType: RoleType;
+    email: string;
+}

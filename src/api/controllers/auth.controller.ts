@@ -16,7 +16,7 @@ import { Request, Response, NextFunction } from 'express';
 import { z } from 'zod'; // For request validation
 import { authService } from '../services/auth.service';
 import { sessionService } from '../services/session.service'; // Import session service
-import { LoginCredentials, TokenPayload } from '@/types/auth.types';
+import { LoginCredentials, TokenPayload,USER_TYPES, ROLE_TYPES, UserType, RoleType } from '@/types/auth.types';
 import logger from '../../utils/logger';
 
 /**
@@ -37,10 +37,21 @@ const loginRequestSchema = z.object({
     password: z.string().min(6, 'Password must be at least 6 characters')
 });
 
+const tokenHeaderSchema = z.object({
+    authorization: z.string()
+        .regex(/^Bearer .+$/, 'Authorization header must be in Bearer token format')
+});
+
 /**
  * Type for standardized API responses
  * Ensures consistent response format
  */
+interface ApiResponse<T> {
+    success: boolean;
+    message: string;
+    data?: T;
+    error?: string;
+}
 interface ApiResponse<T> {
     success: boolean;
     message: string;
@@ -67,6 +78,9 @@ export const authController = {
      * - 429: Too many failed attempts
      * - 500: Server error
      */
+
+
+
     async login(
         req: Request<{}, {}, LoginCredentials>,
         res: Response<ApiResponse<{ token: string; user: any }>>,
@@ -216,63 +230,64 @@ export const authController = {
         next: NextFunction
     ): Promise<void> {
         try {
-            // Log verification attempt
-            authControllerLogger.info({
-                ip: req.ip,
-                userAgent: req.get('user-agent')
-            }, 'Token verification initiated');
-
-            // Extract token from header
+            // Get token from header
             const authHeader = req.headers.authorization;
             if (!authHeader?.startsWith('Bearer ')) {
                 res.status(401).json({
                     success: false,
-                    message: 'Unauthorized - Bearer token missing',
-                    error: 'Authentication required'
+                    message: 'Authorization header missing',
+                    error: 'No token provided'
                 });
                 return;
             }
-
-            // Verify token
+    
             const token = authHeader.split(' ')[1];
-            const decodedToken = await authService.verifyToken(token);
-
-            // Send success response
+    
+            // Verify token - will include all required user info including email
+            const verifiedData = await authService.verifyToken(token);
+    
+            // Check if session is valid
+            const isValidSession = await sessionService.validateSession(token);
+            if (!isValidSession) {
+                res.status(401).json({
+                    success: false,
+                    message: 'Session expired',
+                    error: 'Invalid session'
+                });
+                return;
+            }
+    
+            // Send complete response
             res.status(200).json({
                 success: true,
                 message: 'Token is valid',
-                data: decodedToken
+                data: verifiedData  // Contains userId, email, userType, roleType
             });
-
+    
         } catch (error) {
-            // Log verification failure
-            authControllerLogger.error({
-                error: error instanceof Error ? error.message : 'Unknown error',
-                stack: error instanceof Error ? error.stack : undefined,
-                ip: req.ip
-            }, 'Token verification failed');
-
-            // Handle JWT-specific errors
-            if (error instanceof Error && error.name === 'JsonWebTokenError') {
-                res.status(401).json({
-                    success: false,
-                    message: 'Invalid token',
-                    error: 'Authentication failed'
-                });
-                return;
+            if (error instanceof Error) {
+                if (error.name === 'JsonWebTokenError') {
+                    res.status(401).json({
+                        success: false,
+                        message: 'Invalid token',
+                        error: 'Authentication failed'
+                    });
+                    return;
+                }
+    
+                if (error.name === 'TokenExpiredError') {
+                    res.status(401).json({
+                        success: false,
+                        message: 'Token has expired',
+                        error: 'Authentication expired'
+                    });
+                    return;
+                }
             }
-
-            if (error instanceof Error && error.name === 'TokenExpiredError') {
-                res.status(401).json({
-                    success: false,
-                    message: 'Token has expired',
-                    error: 'Authentication expired'
-                });
-                return;
-            }
-
-            // Pass other errors to global handler
+            
+            // Handle other errors
             next(error);
         }
     }
+
 };

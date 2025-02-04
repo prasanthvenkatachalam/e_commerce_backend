@@ -1,261 +1,157 @@
 // src/index.ts
 
-//======================= IMPORTS =======================//
 /**
  * ENVIRONMENT VARIABLES
- * Why import first?
- * - Must load environment variables before anything else
- * - Ensures config is available to other modules
- * - Required for configuration
+ * Load these first before anything else
  */
 import 'dotenv/config';
 
 /**
- * EXPRESS FRAMEWORK
- * Why Express?
- * - Popular Node.js web framework
- * - Easy to use and understand
- * - Large ecosystem of middleware
- * - Great for REST APIs
+ * STANDARD IMPORTS
  */
 import express from 'express';
-
-/**
- * SECURITY MIDDLEWARE
- * Why Helmet?
- * - Sets security HTTP headers
- * - Protects against common web vulnerabilities
- * - Industry standard security practice
- * Examples:
- * - XSS Protection
- * - Content Security Policy
- * - Prevent Clickjacking
- */
 import helmet from 'helmet';
-
-/**
- * CORS MIDDLEWARE
- * Why CORS?
- * - Enables Cross-Origin Resource Sharing
- * - Required for frontend to backend communication
- * - Controls which domains can access your API
- * - Essential for web applications
- */
 import cors from 'cors';
-
-/**
- * COMPRESSION MIDDLEWARE
- * Why Compression?
- * - Compresses response bodies
- * - Reduces bandwidth usage
- * - Faster response times
- * - Better user experience
- */
 import compression from 'compression';
 
 /**
- * DATABASE CONNECTION TEST
- * Why test connection?
- * - Ensures database is available
- * - Fails fast if database is down
- * - Required for application startup
+ * REQUEST AND RESPONSE TYPES
+ */
+import type { Request, Response, NextFunction } from 'express';
+
+/**
+ * CUSTOM UTILITIES AND CONFIGURATIONS
  */
 import { testConnection } from './db/config';
-
-/**
- * CUSTOM LOGGER
- * Why custom logger?
- * - Consistent logging format
- * - Better than console.log
- * - Structured logging
- * - Environment-based configuration
- */
+import { checkRedisHealth } from './config/redis.config';
 import logger from './utils/logger';
-
-/**
- * APPLICATION CONFIGURATION
- * Why centralized config?
- * - Single source of truth
- * - Environment-based settings
- * - Easy to maintain
- * - Type-safe configuration
- */
 import { config } from './config';
-
-/**
- * ERROR HANDLING MIDDLEWARE
- * Why centralized error handling?
- * - Consistent error responses
- * - Better error tracking
- * - Cleaner code
- * - Proper error logging
- */
 import { errorHandler } from './middlewares/error.middleware';
-
-/**
- * REQUEST LOGGING MIDDLEWARE
- * Why log requests?
- * - Track API usage
- * - Debug issues
- * - Monitor performance
- * - Audit trail
- */
 import { requestLogger } from './middlewares/logging.middleware';
-
-/**
- * API ROUTES
- * Why separate routes?
- * - Better organization
- * - Modular code
- * - Easier to maintain
- * - Clear structure
- */
 import routes from '@/api/routes';
 
-//======================= LOGGER SETUP =======================//
 /**
  * APPLICATION LOGGER
- * Why create a child logger?
- * - Adds 'app' context to all logs
- * - Makes debugging easier
- * - Groups application-level logs
  */
-const appLogger = logger.child({ module: 'app' });
-
-//======================= APPLICATION SETUP =======================//
+const appLogger = logger.child({ 
+    module: 'app',
+    context: 'server'
+});
 /**
  * CREATE EXPRESS APPLICATION
- * Why separate function?
- * - Clean initialization
- * - Better error handling
- * - Easy to test
- * - Clear middleware order
+ * Initializes and configures the Express application
  */
 async function createApp() {
   const app = express();
 
-  /**
-   * MIDDLEWARE STACK
-   * Order is important!
-   * 
-   * 1. helmet() - Security headers first
-   * 2. cors() - Handle cross-origin requests
-   * 3. compression() - Compress responses
-   * 4. express.json() - Parse JSON requests
-   * 5. requestLogger - Log all requests
-   * 6. routes - API endpoints
-   * 7. errorHandler - Catch all errors
-   */
-  app.use(helmet());         // Security
-  app.use(cors());          // Cross-origin
-  app.use(compression());   // Response compression
-  app.use(express.json());  // Body parsing
-  app.use(requestLogger);   // Request logging
+  // Basic middleware setup
+  app.use(helmet());
+  app.use(cors());
+  app.use(compression());
+  app.use(express.json());
+  app.use(requestLogger);
 
-  // Mount API routes with prefix
+  // Health check endpoint
+  app.get('/health', (req: Request, res: Response) => {
+      res.status(200).json({
+          status: 'success',
+          message: 'Server is healthy',
+          timestamp: new Date().toISOString()
+      });
+  });
+
+  // API routes
   app.use('/api', routes);
 
-  // Error handler must be last
+  // Error handler (must be last)
   app.use(errorHandler);
 
   return app;
 }
-
-//======================= SERVER STARTUP =======================//
 /**
- * START SERVER
- * Why separate function?
- * - Sequential startup
- * - Proper error handling
- * - Clear startup process
- * - Easy to extend
+ * SERVER STARTUP FUNCTION
+ * Handles the entire startup sequence including service checks
  */
 async function startServer() {
   try {
-    /**
-     * STARTUP SEQUENCE
-     * 1. Test database connection
-     * 2. Create Express application
-     * 3. Start listening on port
-     */
-    await testConnection();
-    const app = await createApp();
-    
-    // Get port from config or use default
-    const port = config.server.port || 3000;
+      // Check Redis connection
+      const redisHealth = await checkRedisHealth();
+      if (!redisHealth.isHealthy) {
+          appLogger.warn({
+              error: redisHealth.error,
+              timestamp: new Date().toISOString()
+          }, 'Redis health check failed. Proceeding without Redis...');
+      } else {
+          appLogger.info({ latency: redisHealth.latency }, 'Redis health check passed');
+      }
 
-    // Start server
-    app.listen(port, () => {
-      appLogger.info(
-        { 
-          port,
-          env: config.env 
-        },
-        'Server started successfully'
-      );
-    });
+      // Check database connection
+      await testConnection();
+      appLogger.info('Database connection test passed');
+
+      // Create and configure Express app
+      const app = await createApp();
+      const port = config.server.port || 3000;
+
+      // Start the server
+      app.listen(port, () => {
+          appLogger.info({
+              port,
+              env: config.env,
+              apiPrefix: '/api',
+              redisLatency: redisHealth.latency
+          }, 'Server started successfully 🚀');
+      });
   } catch (error) {
-    /**
-     * FATAL ERROR HANDLING
-     * Why exit process?
-     * - Can't run without critical services
-     * - Clear error indication
-     * - Allows process manager to restart
-     */
-    appLogger.error({ error }, 'Failed to start server');
-    process.exit(1);
+      appLogger.error({
+          error: error instanceof Error ? error.message : 'Unknown error',
+          stack: error instanceof Error ? error.stack : undefined
+      }, 'Failed to start server');
+
+      // Exit with error code
+      process.exit(1);
   }
 }
+/**
+ * PROCESS EVENT HANDLERS
+ * Handle various process events and signals
+ */
+
+// Handle uncaught exceptions
+process.on('uncaughtException', (error: Error) => {
+  appLogger.error({ 
+      error: error.message,
+      stack: error.stack,
+      type: 'UncaughtException'
+  }, 'Uncaught exception occurred');
+  
+  process.exit(1);
+});
+
+// Handle unhandled promise rejections
+process.on('unhandledRejection', (reason: unknown, promise: Promise<unknown>) => {
+  appLogger.error({ 
+      reason,
+      promise,
+      type: 'UnhandledRejection'
+  }, 'Unhandled promise rejection');
+  
+  process.exit(1);
+});
+
+// Handle termination signals
+process.on('SIGTERM', () => {
+  appLogger.info('SIGTERM signal received. Starting graceful shutdown...');
+  process.exit(0);
+});
+
+process.on('SIGINT', () => {
+  appLogger.info('SIGINT signal received. Starting graceful shutdown...');
+  process.exit(0);
+});
 
 /**
- * START APPLICATION
- * Why immediate invocation?
- * - Begins startup process
- * - No need to call explicitly
- * - Clear entry point
- */
+* START THE SERVER
+* Initialize the application
+*/
 startServer();
-
-/**
- * USAGE AND CONSIDERATIONS:
- * 
- * 1. Environment Variables:
- *    - Set NODE_ENV appropriately
- *    - Configure ports and hosts
- *    - Set security keys
- * 
- * 2. Production Setup:
- *    - Use process manager (PM2/Nodemon)
- *    - Set up monitoring
- *    - Configure proper logging
- * 
- * 3. Development:
- *    - Use nodemon for auto-reload
- *    - Set DEBUG env for more logs
- *    - Use development config
- * 
- * 4. Testing:
- *    - Export app for testing
- *    - Use test database
- *    - Mock external services
- */
-
-/**
- * EXAMPLE TEST SETUP:
- * 
- * import { createApp } from './index';
- * import request from 'supertest';
- * 
- * describe('API Tests', () => {
- *   let app;
- *   
- *   beforeAll(async () => {
- *     app = await createApp();
- *   });
- * 
- *   it('should respond to health check', async () => {
- *     const response = await request(app).get('/api/health');
- *     expect(response.status).toBe(200);
- *   });
- * });
- */

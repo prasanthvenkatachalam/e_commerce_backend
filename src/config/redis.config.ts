@@ -1,254 +1,314 @@
 // src/config/redis.config.ts
-import { Redis, RedisOptions } from 'ioredis'; // Import the Redis library
-import logger from '@/utils/logger'; // Import our logging utility
-import { config } from '@/config'; // Import our application configuration
-import { URL } from 'url'; // Import the URL class for parsing URLs
 
-// Our Redis-specific logger (helps us categorize logs)
+import { Redis, RedisOptions } from 'ioredis';
+import logger from '@/utils/logger';
+import { config } from '@/config';
+import { URL } from 'url';
+
+// Create Redis-specific logger
 const redisLogger = logger.child({
     module: 'redis',
-    service: 'connection'
+    context: 'connection'
 });
 
-// Define types for Redis error codes (for better error handling)
-type RedisErrorCode =
-    | 'ECONNREFUSED' // Connection refused
-    | 'ECONNRESET'  // Connection reset
-    | 'ETIMEDOUT'  // Connection timed out
-    | 'ENOTFOUND'  // Host not found
-    | 'READONLY'   // Read-only mode
-    | 'LOADING'    // Redis is still loading data
-    | 'NOAUTH'     // Authentication failed
-    | 'CLUSTERDOWN'; // Cluster is down
+// Define Redis error types for better error handling
+type RedisErrorCode = 
+    | 'ECONNREFUSED' 
+    | 'ECONNRESET'
+    | 'ETIMEDOUT'
+    | 'READONLY'
+    | 'LOADING'
+    | 'CLUSTERDOWN';
 
-// Interface to extend the standard Error object with Redis-specific properties
 interface RedisError extends Error {
-    code: RedisErrorCode; // The Redis error code
-    errno?: number;       // The system error number (optional)
-    syscall?: string;     // The system call that failed (optional)
+    code: RedisErrorCode;
 }
 
-// Interface for Redis health check results
+// Interface for health check responses
 interface RedisHealthCheck {
-    isHealthy: boolean; // Is Redis healthy?
-    latency?: number;  // Latency (in milliseconds)
-    error?: string;    // Error message (if any)
-    lastChecked: Date; // Last time the health was checked
-    memory?: {       // Memory usage information (optional)
+    isHealthy: boolean;
+    latency?: number;
+    error?: string;
+    lastChecked: Date;
+    memory?: {
         used: number;
         peak: number;
         fragmentationRatio: number;
     };
-    clients?: {      // Client connection information (optional)
-        connected: number;
-        blocked: number;
+    stats?: {
+        totalConnections: number;
+        activeConnections: number;
+        blockedConnections: number;
+        usedMemoryPeak: number;
     };
 }
-
-// Interface for our custom Redis configuration (extends ioredis's RedisOptions)
-interface TypedRedisConfig extends RedisOptions {
-    host: string;       // Redis host
-    port: number;       // Redis port
-    username?: string;  // Redis username (optional)
-    password?: string;  // Redis password (optional)
-    db?: number;       // Redis database number (optional)
-    tls?: {            // TLS/SSL options (optional)
-        rejectUnauthorized: boolean;
-        ca?: string;
-        cert?: string;
-        key?: string;
-    };
-    maxRetriesPerRequest: number; // Maximum retries per request
-    retryStrategy: (times: number) => number | null; // Retry strategy function
-    reconnectOnError: (error: Error) => boolean;   // Reconnect on error function
-    connectTimeout: number;    // Connection timeout
-    commandTimeout: number;   // Command timeout
-    keepAlive: number;      // Keep-alive interval
-    enableOfflineQueue: boolean; // Enable offline queueing
-    enableReadyCheck: boolean; // Enable ready check
-    autoResubscribe: boolean; // Auto-resubscribe to channels
-    autoResendUnfulfilledCommands: boolean; // Auto-resend unfulfilled commands
-    lazyConnect: boolean;    // Lazy connect
-    showFriendlyErrorStack: boolean; // Show friendly error stack
-}
-
-
-// Parse the Redis URL from the configuration
+// Parse Redis connection URL
 const parsedRedisUrl = new URL(config.redis.url);
 
-// Our Redis configuration object
-const redisConfig: TypedRedisConfig = {
-    host: parsedRedisUrl.hostname, // Extract the hostname from the URL
-    port: parseInt(parsedRedisUrl.port, 10) || 6379, // Extract the port (default to 6379 if not specified)
-    username: parsedRedisUrl.username || undefined, // Extract the username (optional)
-    password: parsedRedisUrl.password || undefined, // Extract the password (optional)
-    db: parseInt(parsedRedisUrl.pathname.slice(1), 10) || 0, // Extract the database number (default to 0)
-    maxRetriesPerRequest: 3, // Maximum number of retries for each request
-    retryStrategy(times: number): number | null { // Function to determine the delay between retries
-        const maxRetryDelay = 2000; // Maximum delay of 2 seconds
-        const delay = Math.min(times * 50, maxRetryDelay); // Calculate the delay (increases with each attempt)
-
+/**
+ * Redis Client Configuration
+ * Comprehensive setup with error handling and connection management
+ */
+const redisConfig: RedisOptions = {
+    // Connection settings
+    host: parsedRedisUrl.hostname,
+    port: parseInt(parsedRedisUrl.port, 10) || 6379,
+    username: parsedRedisUrl.username || undefined,
+    password: parsedRedisUrl.password || undefined,
+    db: parseInt(parsedRedisUrl.pathname.slice(1), 10) || 0,
+    // Performance settings
+    maxRetriesPerRequest: 3,
+    connectTimeout: 10000,    // 10 seconds
+    commandTimeout: 5000,     // 5 seconds
+    keepAlive: 30000,        // 30 seconds
+    // Retry strategy with exponential backoff
+    retryStrategy(times: number): number | null {
+        const maxRetryDelay = 5000;  // 5 seconds max delay
+        const delay = Math.min(times * 100, maxRetryDelay);
         redisLogger.info({
             attempt: times,
             delay,
             nextRetryIn: `${delay}ms`
-        }, 'Retrying Redis connection'); // Log the retry attempt
-
-        if (times > 20) { // Stop retrying after 20 attempts
+        }, 'Retrying Redis connection');
+        // Stop retrying after 50 attempts (adjust as needed)
+        if (times > 50) {
             redisLogger.error('Maximum Redis retry attempts reached');
-            return null; // Return null to stop retrying
+            return null;
         }
-
-        return delay; // Return the delay in milliseconds
+        return delay;
     },
-
-    reconnectOnError(err: Error): boolean { // Function to determine if we should reconnect on error
-        const reconnectErrors: RedisErrorCode[] = ['READONLY', 'LOADING', 'CLUSTERDOWN']; // List of errors to reconnect on
-        return reconnectErrors.some(code => err.message.includes(code)); // Check if the error message contains any of the reconnect errors
+    // Reconnection error handling
+    reconnectOnError(err: Error): boolean {
+        const reconnectErrors = ['READONLY', 'LOADING', 'CLUSTERDOWN'];
+        const shouldReconnect = reconnectErrors.some(code => err.message.includes(code));
+        
+        if (shouldReconnect) {
+            redisLogger.warn({ error: err.message }, 'Reconnecting due to recoverable error');
+        }
+        
+        return shouldReconnect;
     },
-
-    connectTimeout: 10000, // Connection timeout of 10 seconds
-    commandTimeout: 5000, // Command timeout of 5 seconds
-    keepAlive: 30000, // Keep-alive interval of 30 seconds
-    enableOfflineQueue: false, // Disable offline queueing
-    enableReadyCheck: true, // Enable ready check
-    autoResubscribe: true, // Auto-resubscribe to channels
-    autoResendUnfulfilledCommands: true, // Auto-resend unfulfilled commands
-    lazyConnect: false, // Connect immediately
-    tls: config.redis.tls ? { rejectUnauthorized: true } : undefined, // Use config.redis.tls
-    showFriendlyErrorStack: !config.isProduction // Use config.isProduction
+    // Feature flags
+    enableOfflineQueue: true, // Enable offline queue to prevent immediate failures
+    enableReadyCheck: true,
+    autoResubscribe: true,
+    autoResendUnfulfilledCommands: true,
+    lazyConnect: false,
+    // Security and debugging
+    tls: config.redis.tls ? { rejectUnauthorized: true } : undefined,
+    showFriendlyErrorStack: !config.isProduction
 };
-
-// Create the Redis client instance
+/**
+ * Redis Client Instance
+ * Create and configure the Redis client with event handlers
+ */
 const redisClient = new Redis(redisConfig);
 
-// ... (Previous code from redis.config.ts)
-
-// Event handlers for the Redis client
-redisClient.on('connect', () => { // When a connection to Redis is established
-    redisLogger.info({ // Log the connection information
+// Connection event handlers
+redisClient.on('connect', () => {
+    redisLogger.info({
         host: redisConfig.host,
-        port: redisConfig.port
-    }, 'Redis connected successfully! 🎉');
+        port: redisConfig.port,
+        timestamp: new Date().toISOString()
+    }, 'Redis connected successfully! 🚀');
 });
 
-redisClient.on('ready', () => { // When the Redis client is ready to accept commands
-    redisLogger.info('Redis client is ready to accept commands');
+redisClient.on('ready', () => {
+    redisLogger.info({
+        timestamp: new Date().toISOString()
+    }, 'Redis client is ready to accept commands');
 });
 
-redisClient.on('error', (error: RedisError) => { // When a Redis error occurs
-    redisLogger.error({ // Log the error details
+redisClient.on('error', (error: RedisError) => {
+    redisLogger.error({
         code: error.code,
         message: error.message,
         stack: error.stack,
-        syscall: error.syscall
+        timestamp: new Date().toISOString()
     }, 'Redis connection error occurred');
 });
 
-redisClient.on('close', () => { // When the Redis connection is closed
-    redisLogger.warn('Redis connection closed');
+redisClient.on('close', () => {
+    redisLogger.warn({
+        timestamp: new Date().toISOString()
+    }, 'Redis connection closed');
 });
 
-redisClient.on('end', () => { // When the Redis connection has ended
-    redisLogger.warn('Redis connection ended');
-});
-
-// Function to retrieve Redis server information
+/**
+ * Redis Info Retrieval
+ * Get detailed Redis server information
+ */
 async function getRedisInfo(): Promise<Record<string, string>> {
     try {
-        const info = await redisClient.info(); // Get the Redis info string
-        return info.split('\n') // Split the string into lines
-            .filter(line => line.includes(':')) // Filter out lines that don't contain a colon (key-value separator)
-            .reduce((acc, line) => { // Reduce the lines into an object
-                const [key, value] = line.split(':'); // Split each line into key and value
-                acc[key.trim()] = value.trim(); // Add the key-value pair to the object
+        const info = await redisClient.info();
+        return info
+            .split('\n')
+            .filter(line => line.includes(':'))
+            .reduce((acc, line) => {
+                const [key, value] = line.split(':');
+                acc[key.trim()] = value.trim();
                 return acc;
-            }, {} as Record<string, string>); // Initialize an empty object
-    } catch (error) { // If there's an error retrieving info
-        redisLogger.error({ error }, "Failed to retrieve Redis info"); // Log the error
-        return {}; // Return an empty object
+            }, {} as Record<string, string>);
+    } catch (error) {
+        redisLogger.error({ 
+            error,
+            timestamp: new Date().toISOString()
+        }, "Failed to retrieve Redis info");
+        return {};
     }
 }
 
-// Function to check the health of the Redis connection
+/**
+ * Redis Health Check
+ * Comprehensive health check with performance metrics
+ */
 export async function checkRedisHealth(): Promise<RedisHealthCheck> {
-    const startTime = process.hrtime(); // Record the start time for latency calculation
+    const startTime = process.hrtime();
+    let attempts = 0;
+    const maxAttempts = 5; // Maximum retry attempts
+    const retryDelay = 2000; // 2 seconds between retries
 
-    try {
-        const pingResult = await redisClient.ping(); // Send a PING command to Redis
-        const [seconds, nanoseconds] = process.hrtime(startTime); // Calculate the time elapsed
-        const latency = seconds * 1000 + nanoseconds / 1000000; // Convert nanoseconds to milliseconds
+    while (attempts < maxAttempts) {
+        try {
+            attempts++;
+            const pingResult = await redisClient.ping();
+            const [seconds, nanoseconds] = process.hrtime(startTime);
+            const latency = seconds * 1000 + nanoseconds / 1000000;
 
-        const info = await getRedisInfo(); // Get Redis server info
+            const info = await getRedisInfo();
 
-        return { // Return the health check result
-            isHealthy: pingResult === 'PONG', // Check if the PING command returned PONG
-            latency, // The latency in milliseconds
-            lastChecked: new Date(), // The time the health check was performed
-            memory: { // Memory usage information
-                used: parseInt(info['used_memory'] || '0', 10), // Used memory
-                peak: parseInt(info['used_memory_peak'] || '0', 10), // Peak memory usage
-                fragmentationRatio: parseFloat(info['mem_fragmentation_ratio'] || '0') // Memory fragmentation ratio
-            },
-            clients: { // Client connection information
-                connected: parseInt(info['connected_clients'] || '0', 10), // Number of connected clients
-                blocked: parseInt(info['blocked_clients'] || '0', 10) // Number of blocked clients
+            return {
+                isHealthy: pingResult === 'PONG',
+                latency,
+                lastChecked: new Date(),
+                memory: {
+                    used: parseInt(info['used_memory'] || '0', 10),
+                    peak: parseInt(info['used_memory_peak'] || '0', 10),
+                    fragmentationRatio: parseFloat(info['mem_fragmentation_ratio'] || '0')
+                },
+                stats: {
+                    totalConnections: parseInt(info['total_connections_received'] || '0', 10),
+                    activeConnections: parseInt(info['connected_clients'] || '0', 10),
+                    blockedConnections: parseInt(info['blocked_clients'] || '0', 10),
+                    usedMemoryPeak: parseInt(info['used_memory_peak'] || '0', 10)
+                }
+            };
+        } catch (error) {
+            redisLogger.error({
+                attempt: attempts,
+                error: error instanceof Error ? {
+                    message: error.message,
+                    stack: error.stack,
+                    name: error.name
+                } : 'Unknown error',
+                timestamp: new Date().toISOString()
+            }, 'Redis health check failed');
+
+            if (attempts < maxAttempts) {
+                redisLogger.info(`Retrying Redis health check in ${retryDelay}ms...`);
+                await new Promise(resolve => setTimeout(resolve, retryDelay));
+            } else {
+                // Ensure we return a valid RedisHealthCheck object after max retries
+                return {
+                    isHealthy: false,
+                    error: error instanceof Error ? error.message : 'Unknown error',
+                    lastChecked: new Date()
+                };
             }
-        };
-    } catch (error) { // If there's an error during the health check
-        redisLogger.error({ error }, 'Redis health check failed'); // Log the error
-        return { // Return an unhealthy result
-            isHealthy: false,
-            error: error instanceof Error ? error.message : 'Unknown error',
-            lastChecked: new Date()
-        };
+        }
     }
+
+    // Fallback return in case the loop exits unexpectedly
+    return {
+        isHealthy: false,
+        error: 'Unexpected error during Redis health check',
+        lastChecked: new Date()
+    };
 }
 
-// ... (Previous code from redis.config.ts)
-
-// Function to gracefully close the Redis connection
+/**
+ * Graceful Connection Closure
+ * Properly close Redis connection with cleanup
+ */
 export async function closeRedisConnection(): Promise<void> {
     try {
-        redisLogger.info('Gracefully closing Redis connection...'); // Log that we're closing the connection
-        await redisClient.quit(); // Send the QUIT command to Redis (tells it we're disconnecting)
-        redisLogger.info('Redis connection closed successfully'); // Log that the connection was closed
-    } catch (error) { // If there's an error closing the connection
-        redisLogger.error({ error }, 'Error closing Redis connection'); // Log the error
-        redisClient.disconnect(); // Forcefully disconnect the client (as a last resort)
+        redisLogger.info('Initiating graceful Redis connection closure...');
+        
+        // Attempt graceful shutdown with QUIT command
+        await redisClient.quit();
+        redisLogger.info('Redis connection closed successfully');
+    } catch (error) {
+        redisLogger.error({ error }, 'Error during graceful Redis shutdown');
+        
+        // Force disconnect as fallback
+        redisClient.disconnect();
+        redisLogger.warn('Forced Redis disconnect after failed graceful shutdown');
     }
 }
-
-// Event handlers for application shutdown (SIGTERM and SIGINT signals)
-// These signals are sent when the application is being shut down
-process.on('SIGTERM', async () => { // When the application receives a SIGTERM signal (termination request)
-    redisLogger.info('Application shutting down, closing Redis connection...'); // Log that we're shutting down
-    await closeRedisConnection(); // Close the Redis connection
+/**
+ * Process Shutdown Handlers
+ * Ensure clean shutdown on process termination
+ */
+process.on('SIGTERM', async () => {
+    redisLogger.info({
+        signal: 'SIGTERM',
+        timestamp: new Date().toISOString()
+    }, 'Application shutting down, closing Redis connection...');
+    await closeRedisConnection();
 });
 
-process.on('SIGINT', async () => { // When the application receives a SIGINT signal (interrupt, usually Ctrl+C)
-    redisLogger.info('Application interrupted, closing Redis connection...'); // Log that we were interrupted
-    await closeRedisConnection(); // Close the Redis connection
+process.on('SIGINT', async () => {
+    redisLogger.info({
+        signal: 'SIGINT',
+        timestamp: new Date().toISOString()
+    }, 'Application interrupted, closing Redis connection...');
+    await closeRedisConnection();
 });
 
-// Utility function to wrap Redis operations with error handling and health checks
-// This makes it easier to use Redis and ensures that we handle potential errors gracefully
+/**
+ * Redis Operation Wrapper
+ * Execute Redis operations with health checks and error handling
+ */
 export async function withRedis<T>(
-    operation: () => Promise<T>, // The Redis operation to perform (a function that returns a Promise)
-    context: Record<string, unknown> = {} // Additional context for logging (optional)
+    operation: () => Promise<T>,
+    context: Record<string, unknown> = {}
 ): Promise<T> {
     try {
-        const health = await checkRedisHealth(); // Check the Redis connection health
-        if (!health.isHealthy) { // If Redis is not healthy
-            throw new Error('Redis is not healthy'); // Throw an error
+        // Verify Redis health before operation
+        const health = await checkRedisHealth();
+        if (!health.isHealthy) {
+            throw new Error(`Redis is not healthy: ${health.error}`);
         }
-        return await operation(); // Perform the Redis operation
-    } catch (error) { // If there's an error during the operation
-        redisLogger.error({ ...context, error }, 'Redis operation failed'); // Log the error with context
-        throw error; // Re-throw the error so it can be handled by the caller
+
+        // Execute the operation
+        const result = await operation();
+
+        // Log success if context is provided
+        if (Object.keys(context).length > 0) {
+            redisLogger.debug({
+                ...context,
+                success: true,
+                timestamp: new Date().toISOString()
+            }, 'Redis operation completed successfully');
+        }
+
+        return result;
+    } catch (error) {
+        // Log detailed error information
+        redisLogger.error({ 
+            ...context,
+            error: error instanceof Error ? {
+                message: error.message,
+                stack: error.stack,
+                name: error.name
+            } : 'Unknown error',
+            timestamp: new Date().toISOString()
+        }, 'Redis operation failed');
+        
+        throw error;
     }
 }
 
-// Export the Redis client instance (so other parts of the application can use it)
+// Export Redis client and types
+export type { RedisError, RedisHealthCheck };
 export default redisClient;
-
