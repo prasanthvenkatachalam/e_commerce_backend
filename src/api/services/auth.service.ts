@@ -25,19 +25,11 @@ import {
     AUTH_CONSTANTS
 } from '@/types/auth.types';
 
-/**
- * Service-specific logger configuration
- * Adds context to all authentication-related logs
- */
 const authLogger = logger.child({
     service: 'auth',
     module: 'authentication'
 });
 
-/**
- * Redis client configuration with error handling and retry strategy
- * Used for managing login attempts and session data
- */
 const redisClient = new Redis(config.redis.url, {
     enableOfflineQueue: false,
     maxRetriesPerRequest: 3,
@@ -46,9 +38,6 @@ const redisClient = new Redis(config.redis.url, {
     }
 });
 
-/**
- * Login request validation schema using Zod
- */
 const loginSchema = z.object({
     email: z.string()
         .email('Invalid email format')
@@ -176,14 +165,23 @@ export const authService = {
             // Validate input credentials
             const validatedData = loginSchema.parse(credentials);
 
-            // Start database transaction
+            // Get database client for transaction
             client = await pool.connect();
+
+            // Start transaction
             await client.query('BEGIN');
 
-            // Get user with row lock
+            // Fetch user with row lock
             const userResult = await client.query<DatabaseUser>(
-                `SELECT id, email, password_hash, user_type, role_type,
-                        status, failed_login_attempts, last_failed_login
+                `SELECT 
+                    id,
+                    email,
+                    password_hash,
+                    user_type,
+                    role_type,
+                    status,
+                    failed_login_attempts,
+                    last_failed_login
                 FROM users 
                 WHERE email = $1
                 FOR UPDATE`,
@@ -192,16 +190,17 @@ export const authService = {
 
             const user = userResult.rows[0];
 
-            // Validate user exists and is active
+            // Check user exists and is active
             if (!user || user.status !== USER_STATUS.ACTIVE) {
+                await client.query('ROLLBACK');
                 throw new Error('Invalid credentials');
             }
 
-            // Check for account lockout
-            const [isLocked, remainingTime] = await this.isAccountLocked(user);
+            // Check account lockout
+            const [isLocked] = await this.isAccountLocked(user);
             if (isLocked) {
-                const minutesLeft = Math.ceil((remainingTime || 0) / 60);
-                throw new Error(`Account is locked. Try again in ${minutesLeft} minutes.`);
+                await client.query('ROLLBACK');
+                throw new Error('Account is temporarily locked');
             }
 
             // Verify password
@@ -216,26 +215,26 @@ export const authService = {
                 throw new Error('Invalid credentials');
             }
 
-            // Generate access token
+            // Generate authentication token
             const accessToken = await this.generateAuthToken(user);
 
-            // Create session and get session ID
-            const sessionId = randomUUID();
+            // Create new session using session service
             await sessionService.createSession(client, {
                 userId: user.id,
                 token: accessToken,
                 deviceInfo: validatedData.deviceInfo
             });
 
-            // Handle successful login
+            // Reset failed attempts and update login timestamp
             await this.handleSuccessfulLogin(client, user);
 
             // Commit transaction
             await client.query('COMMIT');
 
+            // Return success response
             return {
                 accessToken,
-                sessionId,
+                sessionId: randomUUID(),
                 user: {
                     id: user.id,
                     email: user.email,
@@ -245,19 +244,22 @@ export const authService = {
             };
 
         } catch (error) {
+            // Rollback on any error
             if (client) {
                 await client.query('ROLLBACK');
             }
 
+            // Log error with context
             authLogger.error({
                 error: error instanceof Error ? error.message : 'Unknown error',
                 stack: error instanceof Error ? error.stack : undefined,
                 email: credentials.email
-            }, 'Login failed');
+            }, 'Authentication failed');
 
             throw error;
 
         } finally {
+            // Release database client
             if (client) {
                 client.release();
             }
@@ -265,29 +267,37 @@ export const authService = {
     },
 
     /**
-     * Generates JWT token for authenticated users
+     * Creates JWT tokens for authenticated sessions
      */
     async generateAuthToken(user: DatabaseUser): Promise<string> {
-        const payload = {
+        const payload: TokenPayload = {
             userId: user.id,
             userType: user.user_type,
             roleType: user.role_type,
-            jti: randomUUID()
+            iat: Math.floor(Date.now() / 1000)
         };
 
-        const options: SignOptions = {
+        const signOptions: SignOptions = {
             expiresIn: config.jwt.accessExpiresIn,
             algorithm: 'HS256'
         };
 
-        if (config.jwt.audience) options.audience = config.jwt.audience;
-        if (config.jwt.issuer) options.issuer = config.jwt.issuer;
+        if (config.jwt.audience) {
+            signOptions.audience = config.jwt.audience;
+        }
+        if (config.jwt.issuer) {
+            signOptions.issuer = config.jwt.issuer;
+        }
 
-        return jwt.sign(payload, config.jwt.secret, options);
+        return jwt.sign(
+            payload,
+            config.jwt.secret,
+            signOptions
+        );
     },
 
     /**
-     * Verifies JWT token and returns decoded payload
+     * Validates JWT tokens and extracts payload
      */
     async verifyToken(token: string): Promise<TokenPayload> {
         try {
@@ -296,6 +306,7 @@ export const authService = {
             }) as TokenPayload;
 
             return decoded;
+
         } catch (error) {
             authLogger.error({
                 error: error instanceof Error ? error.message : 'Unknown error'
