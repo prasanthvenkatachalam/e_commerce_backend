@@ -11,11 +11,6 @@
  * 3. Rate limiting for security endpoints
  * 4. Session validation
  * 5. Request logging and monitoring
- * 
- * The middleware uses Redis for:
- * - Rate limiting counters
- * - Token blacklist checking
- * - Session state management
  */
 
 //======================= IMPORTS =======================//
@@ -44,20 +39,19 @@ import {
 
 /**
  * Extended Request type for authenticated requests
- * Adds user and session information to the base Request
  */
 export interface AuthenticatedRequest extends Request {
     user: TokenPayload & {
         userId: string;
         userType: UserType;
         roleType: RoleType;
+        email: string;
     };
     sessionId: string;
 }
 
 /**
  * Request type during authentication process
- * Makes user and session properties optional
  */
 export interface AuthRequest extends Request {
     user?: TokenPayload;
@@ -66,7 +60,6 @@ export interface AuthRequest extends Request {
 
 /**
  * Redis multi-command result type
- * Used for rate limiting operations
  */
 type RedisMultiResult = [Error | null, unknown][];
 
@@ -74,10 +67,10 @@ type RedisMultiResult = [Error | null, unknown][];
 
 /**
  * Token payload validation schema
- * Ensures token contains required claims
  */
 const tokenValidationSchema = z.object({
     userId: z.string().uuid('Invalid user ID format'),
+    email: z.string().email('Invalid email format'), // Added email validation
     userType: z.enum([USER_TYPES.ADMIN, USER_TYPES.CUSTOMER, USER_TYPES.VENDOR] as const),
     roleType: z.enum([
         ROLE_TYPES.SUPER_ADMIN,
@@ -99,7 +92,6 @@ type ValidatedTokenPayload = z.infer<typeof tokenValidationSchema>;
 
 /**
  * Create middleware-specific logger
- * Adds context to all middleware logs
  */
 const authLogger = logger.child({
     module: 'auth-middleware',
@@ -107,8 +99,7 @@ const authLogger = logger.child({
 });
 
 /**
- * Configure Redis client with error handling
- * Used for rate limiting and token management
+ * Configure Redis client
  */
 const redis = new Redis(authConfig.redis.url, {
     enableOfflineQueue: false,
@@ -127,10 +118,6 @@ const redis = new Redis(authConfig.redis.url, {
 
 /**
  * Extracts authentication token from request
- * Checks multiple sources in order:
- * 1. Authorization header (Bearer token)
- * 2. Cookie
- * 3. Query parameter (development only)
  */
 function extractTokenFromRequest(req: AuthRequest): string {
     const authHeader = req.headers.authorization;
@@ -163,7 +150,6 @@ function extractTokenFromRequest(req: AuthRequest): string {
 
 /**
  * Checks if token is blacklisted
- * Uses Redis for fast blacklist checking
  */
 async function verifyTokenBlacklist(jti: string): Promise<boolean> {
     try {
@@ -178,7 +164,6 @@ async function verifyTokenBlacklist(jti: string): Promise<boolean> {
 
 /**
  * Validates token payload structure and content
- * Uses Zod schema for validation
  */
 function validateTokenPayload(payload: unknown): ValidatedTokenPayload {
     const result = tokenValidationSchema.safeParse(payload);
@@ -195,7 +180,6 @@ function validateTokenPayload(payload: unknown): ValidatedTokenPayload {
 
 /**
  * Generates rate limit key for Redis
- * Combines IP and path for unique identification
  */
 function getRateLimitKey(ip: string, path: string): string {
     return `${authConfig.redis.keyPrefix.rateLimit}${ip}:${path}`;
@@ -205,7 +189,6 @@ function getRateLimitKey(ip: string, path: string): string {
 
 /**
  * Main authentication middleware
- * Verifies and validates JWT tokens
  */
 export async function authenticateToken(
     req: AuthRequest,
@@ -304,10 +287,8 @@ export async function authenticateToken(
         ));
     }
 }
-
 /**
  * Role-based authorization middleware
- * Checks if authenticated user has required role
  */
 export function authorize(allowedRoles: RoleType[]) {
     return function authorizeMiddleware(
@@ -355,7 +336,6 @@ export function authorize(allowedRoles: RoleType[]) {
 
 /**
  * Rate limiting middleware
- * Limits request frequency based on IP and path
  */
 export async function rateLimiter(
     req: Request,
@@ -396,8 +376,7 @@ export async function rateLimiter(
 
         // Set rate limit headers
         res.setHeader('X-RateLimit-Limit', authConfig.security.rateLimit.max);
-        res.setHeader('X-RateLimit-Remaining', 
-            Math.max(0, authConfig.security.rateLimit.max - count));
+        res.setHeader('X-RateLimit-Remaining', Math.max(0, authConfig.security.rateLimit.max - count));
         res.setHeader('X-RateLimit-Reset', now + windowSize);
 
         next();
