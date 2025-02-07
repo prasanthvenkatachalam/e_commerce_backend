@@ -1,0 +1,3 @@
+export const CONSTANTS={
+    MAX_IMAGE_UPLOAD_COUNT:"4"
+}
