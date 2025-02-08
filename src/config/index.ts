@@ -167,6 +167,8 @@ export type Config = typeof config;
 
 // Function to perform additional validation on the configuration *after* it's been created.  This is where we can check for things that Zod can't easily handle, like relationships between different configuration values.
 function validateConfig() {
+    
+
     // Validate database configuration.  We require either a DATABASE_URL *or* all the individual database connection parameters (host, port, name, user, password).
     if (!config.db.url && (!config.db.host || !config.db.name || !config.db.user || !config.db.password)) {
         throw new Error( // If the database configuration is incomplete, we throw an error.

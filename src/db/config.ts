@@ -22,7 +22,7 @@ import { Pool, PoolConfig, PoolClient } from 'pg';
  * - Environment-specific settings
  * - Consistent configuration across app
  */
-import { config } from '@/config';
+import { config } from '@/config/index';
 
 /**
  * CUSTOM LOGGER

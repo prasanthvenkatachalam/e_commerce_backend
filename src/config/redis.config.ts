@@ -2,7 +2,7 @@
 
 import { Redis, RedisOptions } from 'ioredis';
 import logger from '@/utils/logger';
-import { config } from '@/config';
+import { config } from '@/config/index';
 import { URL } from 'url';
 
 // Create Redis-specific logger

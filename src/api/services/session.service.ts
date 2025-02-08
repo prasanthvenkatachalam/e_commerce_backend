@@ -51,7 +51,7 @@ import { randomUUID } from 'crypto';
  * - Security events
  * - Error tracking
  */
-import { config } from '@/config';
+
 import logger from '@/utils/logger';
 import pool from '@/db/config'; // Import the database pool
 

@@ -84,12 +84,13 @@ const logger = pino({
  * - Enable SSL if possible
  */
 const pool = new Pool({
-  user: 'ecommerce_user',     // Database username
-  host: 'localhost',          // Database server location
-  database: 'ecommerce',      // Database name
-  password: 'your_password',  // Database password (use env vars!)
-  port: 5432,                 // PostgreSQL port number
+  user: process.env.DB_USER,     // Database username
+  host: process.env.DB_HOST,     // Database server location
+  database: process.env.DB_NAME, // Database name
+  password: process.env.DB_PASSWORD, // Database password
+  port: parseInt(process.env.DB_PORT || "5432"),     // PostgreSQL port number
 });
+
 
 //======================= CONNECTION TESTING =======================//
 /**
